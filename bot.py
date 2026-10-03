@@ -10,34 +10,34 @@ from database import (
     init_db,
     get_group_settings,
     save_group_settings,
+    get_active_groups,
 )
 from services.nobitex import get_usdt_price
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "سلام 👋\n\n"
-        "💵 ربات قیمت دلار نوبیتکس\n\n"
-        "/price - دریافت قیمت\n"
-        "/setinterval 15 - تنظیم فاصله ارسال\n"
-        "/autoprice on - فعال کردن ارسال خودکار\n"
-        "/autoprice off - غیرفعال کردن ارسال خودکار\n"
-        "/settings - مشاهده تنظیمات"
+# ----------------------------------------
+# Price
+# ----------------------------------------
+
+def build_price_message():
+    prices = get_usdt_price()
+
+    buy = prices["buy"]
+    sell = prices["sell"]
+
+    return (
+        "💵 قیمت تتر در نوبیتکس\n\n"
+        f"🟢 خرید: {buy:,.0f} ریال\n"
+        f"🔴 فروش: {sell:,.0f} ریال"
     )
 
 
-async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def price(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
     try:
-        prices = get_usdt_price()
-
-        buy = prices["buy"]
-        sell = prices["sell"]
-
-        message = (
-            "💵 قیمت تتر در نوبیتکس\n\n"
-            f"🟢 خرید: {buy:,.0f} ریال\n"
-            f"🔴 فروش: {sell:,.0f} ریال"
-        )
+        message = build_price_message()
 
         await update.message.reply_text(message)
 
@@ -48,6 +48,110 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ در دریافت قیمت مشکلی پیش آمد."
         )
 
+
+# ----------------------------------------
+# Start
+# ----------------------------------------
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    await update.message.reply_text(
+        "سلام 👋\n\n"
+        "💵 ربات قیمت دلار نوبیتکس\n\n"
+        "دستورات:\n\n"
+        "/price - دریافت قیمت\n"
+        "/setinterval 15 - تنظیم فاصله ارسال\n"
+        "/autoprice on - فعال کردن ارسال خودکار\n"
+        "/autoprice off - غیرفعال کردن ارسال خودکار\n"
+        "/settings - مشاهده تنظیمات"
+    )
+
+
+# ----------------------------------------
+# Admin Check
+# ----------------------------------------
+
+async def is_admin(update: Update):
+    member = await update.effective_chat.get_member(
+        update.effective_user.id
+    )
+
+    if member.status not in (
+        "administrator",
+        "creator"
+    ):
+        await update.message.reply_text(
+            "⛔ فقط ادمین‌های گروه می‌توانند "
+            "تنظیمات ربات را تغییر دهند."
+        )
+
+        return False
+
+    return True
+
+
+# ----------------------------------------
+# Scheduler
+# ----------------------------------------
+
+def remove_existing_job(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int
+):
+    jobs = context.job_queue.get_jobs_by_name(
+        str(chat_id)
+    )
+
+    for job in jobs:
+        job.schedule_removal()
+
+
+def create_group_job(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    interval_minutes: int
+):
+    remove_existing_job(context, chat_id)
+
+    context.job_queue.run_repeating(
+        send_scheduled_price,
+        interval=interval_minutes * 60,
+        first=interval_minutes * 60,
+        chat_id=chat_id,
+        name=str(chat_id)
+    )
+
+
+async def send_scheduled_price(
+    context: ContextTypes.DEFAULT_TYPE
+):
+    chat_id = context.job.chat_id
+
+    try:
+        settings = get_group_settings(chat_id)
+
+        if not settings["auto_price_enabled"]:
+            return
+
+        message = build_price_message()
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=message
+        )
+
+    except Exception as error:
+        print(
+            f"Scheduled price error "
+            f"for {chat_id}: {error}"
+        )
+
+
+# ----------------------------------------
+# Set Interval
+# ----------------------------------------
 
 async def set_interval(
     update: Update,
@@ -64,12 +168,14 @@ async def set_interval(
 
     if not context.args:
         await update.message.reply_text(
-            "مثال:\n/setinterval 15"
+            "مثال:\n"
+            "/setinterval 15"
         )
         return
 
     try:
         minutes = int(context.args[0])
+
     except ValueError:
         await update.message.reply_text(
             "❌ مقدار باید عدد باشد.\n"
@@ -83,18 +189,34 @@ async def set_interval(
         )
         return
 
-    settings = get_group_settings(update.effective_chat.id)
+    chat_id = update.effective_chat.id
+
+    settings = get_group_settings(chat_id)
 
     save_group_settings(
-        update.effective_chat.id,
+        chat_id,
         minutes,
         settings["auto_price_enabled"]
     )
 
+    # اگر ارسال خودکار فعال است،
+    # Scheduler را با فاصله جدید بازسازی کن.
+    if settings["auto_price_enabled"]:
+        create_group_job(
+            context,
+            chat_id,
+            minutes
+        )
+
     await update.message.reply_text(
-        f"✅ فاصله ارسال روی {minutes} دقیقه تنظیم شد."
+        f"✅ فاصله ارسال روی "
+        f"{minutes} دقیقه تنظیم شد."
     )
 
+
+# ----------------------------------------
+# Auto Price
+# ----------------------------------------
 
 async def autoprice(
     update: Update,
@@ -109,34 +231,59 @@ async def autoprice(
     if not await is_admin(update):
         return
 
-    if not context.args or context.args[0].lower() not in ("on", "off"):
+    if (
+        not context.args
+        or context.args[0].lower()
+        not in ("on", "off")
+    ):
         await update.message.reply_text(
-            "مثال:\n"
+            "مثال:\n\n"
             "/autoprice on\n"
             "/autoprice off"
         )
         return
 
-    enabled = context.args[0].lower() == "on"
+    chat_id = update.effective_chat.id
 
-    settings = get_group_settings(update.effective_chat.id)
+    enabled = (
+        context.args[0].lower() == "on"
+    )
+
+    settings = get_group_settings(chat_id)
 
     save_group_settings(
-        update.effective_chat.id,
+        chat_id,
         settings["interval_minutes"],
         enabled
     )
 
     if enabled:
-        await update.message.reply_text(
-            f"✅ ارسال خودکار فعال شد.\n"
-            f"⏱ هر {settings['interval_minutes']} دقیقه"
+        create_group_job(
+            context,
+            chat_id,
+            settings["interval_minutes"]
         )
+
+        await update.message.reply_text(
+            "✅ ارسال خودکار فعال شد.\n\n"
+            f"⏱ هر "
+            f"{settings['interval_minutes']} دقیقه"
+        )
+
     else:
+        remove_existing_job(
+            context,
+            chat_id
+        )
+
         await update.message.reply_text(
             "⛔ ارسال خودکار غیرفعال شد."
         )
 
+
+# ----------------------------------------
+# Settings
+# ----------------------------------------
 
 async def settings(
     update: Update,
@@ -151,8 +298,10 @@ async def settings(
     if not await is_admin(update):
         return
 
+    chat_id = update.effective_chat.id
+
     group_settings = get_group_settings(
-        update.effective_chat.id
+        chat_id
     )
 
     status = (
@@ -169,90 +318,36 @@ async def settings(
     )
 
 
-async def is_admin(update: Update):
-    member = await update.effective_chat.get_member(
-        update.effective_user.id
-    )
+# ----------------------------------------
+# Restore Jobs After Restart
+# ----------------------------------------
 
-    if member.status not in ("administrator", "creator"):
-        await update.message.reply_text(
-            "⛔ فقط ادمین‌های گروه می‌توانند این تنظیم را تغییر دهند."
-        )
-        return False
-
-    return True
-
-
-async def send_scheduled_price(
-    context: ContextTypes.DEFAULT_TYPE
+async def post_init(
+    application: Application
 ):
-    chat_id = context.job.chat_id
-
-    try:
-        group_settings = get_group_settings(chat_id)
-
-        if not group_settings["auto_price_enabled"]:
-            return
-
-        prices = get_usdt_price()
-
-        buy = prices["buy"]
-        sell = prices["sell"]
-
-        message = (
-            "💵 قیمت تتر در نوبیتکس\n\n"
-            f"🟢 خرید: {buy:,.0f} ریال\n"
-            f"🔴 فروش: {sell:,.0f} ریال"
-        )
-
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=message
-        )
-
-    except Exception as error:
-        print(
-            f"Scheduled price error for {chat_id}: {error}"
-        )
-
-
-async def schedule_group(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    chat_id = update.effective_chat.id
-
-    settings = get_group_settings(chat_id)
-
-    remove_existing_job(context, chat_id)
-
-    if settings["auto_price_enabled"]:
-        context.job_queue.run_repeating(
-            send_scheduled_price,
-            interval=settings["interval_minutes"] * 60,
-            first=settings["interval_minutes"] * 60,
-            chat_id=chat_id,
-            name=str(chat_id)
-        )
-
-
-def remove_existing_job(
-    context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int
-):
-    jobs = context.job_queue.get_jobs_by_name(
-        str(chat_id)
-    )
-
-    for job in jobs:
-        job.schedule_removal()
-
-
-async def post_init(application):
     init_db()
 
+    active_groups = get_active_groups()
+
+    print(
+        f"🔄 Restoring "
+        f"{len(active_groups)} active group(s)..."
+    )
+
+    for chat_id, interval_minutes in active_groups:
+        create_group_job(
+            application,
+            chat_id,
+            interval_minutes
+        )
+
+
+# ----------------------------------------
+# Main
+# ----------------------------------------
 
 def main():
+
     application = (
         Application.builder()
         .token(BOT_TOKEN)
@@ -269,15 +364,24 @@ def main():
     )
 
     application.add_handler(
-        CommandHandler("setinterval", set_interval)
+        CommandHandler(
+            "setinterval",
+            set_interval
+        )
     )
 
     application.add_handler(
-        CommandHandler("autoprice", autoprice)
+        CommandHandler(
+            "autoprice",
+            autoprice
+        )
     )
 
     application.add_handler(
-        CommandHandler("settings", settings)
+        CommandHandler(
+            "settings",
+            settings
+        )
     )
 
     print("🤖 Bot is running...")
