@@ -39,7 +39,11 @@ def get_group_settings(chat_id):
     }
 
 
-def save_group_settings(chat_id, interval_minutes, auto_price_enabled):
+def save_group_settings(
+    chat_id,
+    interval_minutes,
+    auto_price_enabled
+):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """
@@ -57,3 +61,16 @@ def save_group_settings(chat_id, interval_minutes, auto_price_enabled):
                 int(auto_price_enabled)
             )
         )
+
+
+def get_active_groups():
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT chat_id, interval_minutes
+            FROM group_settings
+            WHERE auto_price_enabled = 1
+            """
+        ).fetchall()
+
+    return rows
